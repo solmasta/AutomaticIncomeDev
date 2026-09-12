@@ -1,0 +1,9 @@
+{
+  "name": "unclaimed-money-finder-ingest",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "fetch:ca": "node fetch_ca_unclaimed.js"
+  }
+}

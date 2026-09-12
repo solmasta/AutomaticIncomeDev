@@ -1,0 +1,11 @@
+name = "unclaimed-money-finder"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Create the database first with:
+#   wrangler d1 create unclaimed_money_finder
+# then paste the database_id it prints below.
+[[d1_databases]]
+binding = "DB"
+database_name = "unclaimed_money_finder"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
