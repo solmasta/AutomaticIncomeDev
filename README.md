@@ -28,36 +28,31 @@ layout changes and auto-discovery of the CSV link fails, set
 `CSV_URL_OVERRIDE` to the direct link (grab it manually from
 https://sco.ca.gov/upd_download_property_records.html) and re-run.
 
-### One-time setup (all free)
+### One-time setup (all free, no local CLI needed)
 
-1. **Cloudflare account** — sign up at cloudflare.com if you don't have one.
-2. Install Wrangler and log in:
-   ```
-   npm install -g wrangler
-   wrangler login
-   ```
-3. Create the database and note the `database_id` it prints:
-   ```
-   wrangler d1 create unclaimed_money_finder
-   ```
-   Paste that id into `app/wrangler.toml` (`database_id = "..."`).
-4. Apply the schema:
-   ```
-   cd app
-   wrangler d1 execute unclaimed_money_finder --remote --file=schema.sql
-   ```
-5. Deploy the worker:
-   ```
-   wrangler deploy
-   ```
-   Wrangler prints your live URL (`https://unclaimed-money-finder.<you>.workers.dev`).
-6. **Load real data.** In GitHub, add two repo secrets (Settings → Secrets
-   and variables → Actions): `CLOUDFLARE_API_TOKEN` (create one at
-   dash.cloudflare.com/profile/api-tokens with D1 edit permission) and
-   `CLOUDFLARE_ACCOUNT_ID` (shown on your Cloudflare dashboard sidebar).
-   Then run the "Refresh CA unclaimed property data" workflow manually once
-   (Actions tab → select it → "Run workflow") to do the first import. After
-   that it runs itself weekly.
+The D1 database (`unclaimed_money_finder`) and its schema already exist —
+that part's done. Everything else deploys itself via GitHub Actions:
+
+1. **Create a Cloudflare API token** at
+   dash.cloudflare.com/profile/api-tokens → "Create Custom Token" with two
+   permission groups: **Account → D1 → Edit** and **Account → Workers
+   Scripts → Edit**. Copy the token (shown once).
+2. **Find your Cloudflare Account ID** — shown on the right sidebar of any
+   page in the Cloudflare dashboard.
+3. **Add both as GitHub repo secrets**: Settings → Secrets and variables →
+   Actions → New repository secret →
+   - `CLOUDFLARE_API_TOKEN`
+   - `CLOUDFLARE_ACCOUNT_ID`
+4. **Deploy the Worker**: Actions tab → "Deploy Worker" → "Run workflow".
+   (After this first manual run, it redeploys automatically on every push
+   that touches `app/`.) It prints your live URL in the job log, something
+   like `https://unclaimed-money-finder.<you>.workers.dev`.
+5. **Load real data**: Actions tab → "Refresh CA unclaimed property data" →
+   "Run workflow". This does the first import; after that it runs itself
+   weekly.
+
+That's it — no `npm install -g wrangler`, no local login, nothing to run
+on your own machine.
 
 ### What's automated vs. not
 
