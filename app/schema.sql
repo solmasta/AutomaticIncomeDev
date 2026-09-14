@@ -27,5 +27,6 @@ CREATE TABLE IF NOT EXISTS leads (
   stripe_session_id TEXT,
   paid INTEGER NOT NULL DEFAULT 0,   -- flipped to 1 by the Stripe webhook on successful checkout
   paid_at TEXT,
+  filed_at TEXT,                    -- set manually once you've actually filed the claim; NULL = still refundable per policy
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

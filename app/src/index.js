@@ -26,6 +26,44 @@ const STATE_RULES = {
 
 const FILING_FEE_LABEL = "Claim filing assistance";
 
+function refundPolicyHtml(env, feeDisplay) {
+  const supportEmail = env.SUPPORT_EMAIL || "support@example.com";
+  return `
+    <ul>
+      <li><strong>Before we file:</strong> full refund, no questions asked, any time before your claim has actually been submitted to the state.</li>
+      <li><strong>We can't complete it:</strong> if the match doesn't check out, the property's already been claimed, or we can't get documentation from you that the state requires, you get an automatic full refund.</li>
+      <li><strong>After we file:</strong> the $${feeDisplay} fee pays for the filing service, which has then been delivered — it's non-refundable at that point, including if the state later denies or delays the claim, since that decision is the state's, not ours.</li>
+      <li><strong>Our error:</strong> if we make a mistake preparing or filing your claim, you get a full refund regardless of timing.</li>
+      <li>Refunds go back to your original payment method within 5 business days of approval.</li>
+      <li>Questions or refund requests: <a href="mailto:${supportEmail}">${supportEmail}</a></li>
+    </ul>`;
+}
+
+function refundPolicyPage(env) {
+  const feeCents = Number(env.FILING_FEE_CENTS || 2900);
+  const feeDisplay = (feeCents / 100).toFixed(2);
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Refund Policy</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 640px; margin: 0 auto; padding: 24px 16px 64px; background: #fafafa; color: #1a1a1a; }
+  @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } }
+  li { margin-bottom: 10px; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+  <p><a href="/">&larr; Back to search</a></p>
+  <h1>Refund Policy</h1>
+  ${refundPolicyHtml(env, feeDisplay)}
+</body>
+</html>`;
+}
+
 function htmlPage(env) {
   const feeCents = Number(env.FILING_FEE_CENTS || 2900);
   const feeDisplay = (feeCents / 100).toFixed(2);
@@ -57,6 +95,8 @@ function htmlPage(env) {
   #status { color: #666; margin: 12px 0; }
   .lead-form { display: none; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
   .lead-form input { flex: 1; min-width: 160px; padding: 8px 10px; border-radius: 6px; border: 1px solid #ccc; }
+  .policy-note { flex-basis: 100%; font-size: 0.78rem; color: #888; }
+  .policy-note a { color: inherit; }
 </style>
 </head>
 <body>
@@ -76,6 +116,7 @@ function htmlPage(env) {
     pay us anything. The $${feeDisplay} fee is only for the optional
     convenience of having us prepare and file the paperwork for you, charged
     upfront regardless of outcome, not a cut of any money you recover.
+    See our <a href="/refund-policy">refund policy</a>.
   </div>
 
   <script>
@@ -123,6 +164,7 @@ function htmlPage(env) {
               <input type="text" name="full_name" placeholder="Full name" required>
               <input type="email" name="email" placeholder="Email" required>
               <button type="submit">Continue to payment</button>
+              <div class="policy-note">By paying you agree to our <a href="/refund-policy" target="_blank" rel="noopener">refund policy</a> — full refund any time before we file, non-refundable after.</div>
             </form>
           </div>
         \`).join('');
@@ -313,6 +355,9 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/") {
       return new Response(htmlPage(env), { headers: { "content-type": "text/html; charset=utf-8" } });
+    }
+    if (url.pathname === "/refund-policy") {
+      return new Response(refundPolicyPage(env), { headers: { "content-type": "text/html; charset=utf-8" } });
     }
     if (url.pathname === "/api/search" && request.method === "GET") {
       return handleSearch(url, env);
