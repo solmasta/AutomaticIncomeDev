@@ -81,13 +81,52 @@ No local CLI needed for either — both are dashboard actions. Change the
 fee amount any time by editing `FILING_FEE_CENTS` in `app/wrangler.toml`
 (cents, so `2900` = $29) and pushing — the deploy workflow picks it up.
 
+### AI agents
+
+Three Claude-powered agents, each optional and each degrading gracefully
+(the surrounding feature just skips the AI step) if its key isn't set.
+Called via raw HTTP to `api.anthropic.com` — this Worker is deliberately
+dependency-free, same reasoning as the Stripe integration, so there's no
+npm bundle for the CI deploy to break on.
+
+1. **Match-confidence agent** — every search sends the candidates to Claude
+   Haiku 4.5 in one batched call, which scores 0-100 how likely each is
+   really the searcher (accounting for nicknames, common names, city
+   corroboration) and shows a badge ("Likely you" / "Verify carefully" /
+   "Probably not you") before anyone pays. Protects your refund rate.
+2. **Watchlist agent** — a zero-result search offers "notify me later."
+   A Cloudflare Cron Trigger (`app/wrangler.toml` → `[triggers]`, Fridays
+   14:00 UTC, an hour after the weekly CA data refresh) re-checks every
+   open watchlist entry and emails anyone with a new match via Resend —
+   the actual "runs while you sleep" piece of this business.
+3. **Claim-filing assistant agent** — the moment a Stripe payment lands,
+   Claude Sonnet 5 drafts a cover letter and document checklist for the
+   claim and emails it to `SUPPORT_EMAIL`, so filing takes minutes instead
+   of starting from a blank page. It won't invent state form field names
+   or claim numbers it wasn't given — the checklist tells you to verify
+   current requirements against the state's own instructions before
+   mailing.
+
+To turn these on, add as encrypted Cloudflare variables (same dashboard
+path as the Stripe keys above):
+- `ANTHROPIC_API_KEY` — console.anthropic.com → API Keys. Powers agents 1 and 3.
+- `RESEND_API_KEY` — resend.com (free tier) → API Keys. Powers agents 2 and 3.
+  Without a verified sending domain, leave `FROM_EMAIL` at its default
+  `onboarding@resend.dev` (Resend's no-setup sandbox sender).
+
+Also set `SITE_URL` in `app/wrangler.toml` to your real `*.workers.dev`
+URL once you have it (used in the watchlist-match email link) and push.
+
 ### What's automated vs. not
 
-- Automated: search, matching, payment collection, weekly data refresh.
+- Automated: search, match-confidence scoring, payment collection, weekly
+  data refresh, watchlist re-checking and notification, claim-packet
+  drafting.
 - **Not** automated: actually filing the claim once someone pays. California
   requires a signed claim form (sometimes notarized) mailed to the
   Controller's office — that step still needs a human. Check the `leads`
-  table (`paid = 1`) for who's paid and owed a filed claim.
+  table (`paid = 1`) for who's paid and owed a filed claim; the operator
+  email from agent 3 has the drafted cover letter ready to go.
 
 ### Legal — read before charging anyone a fee
 

@@ -18,6 +18,17 @@ CREATE TABLE IF NOT EXISTS properties (
 CREATE INDEX IF NOT EXISTS idx_properties_name_norm ON properties(owner_name_normalized);
 CREATE INDEX IF NOT EXISTS idx_properties_state ON properties(state);
 
+CREATE TABLE IF NOT EXISTS watchlist (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL,
+  full_name TEXT NOT NULL,
+  name_normalized TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  notified_at TEXT   -- set by the weekly watchlist-sweep agent once a match is emailed; NULL = still watching
+);
+
+CREATE INDEX IF NOT EXISTS idx_watchlist_name_norm ON watchlist(name_normalized);
+
 CREATE TABLE IF NOT EXISTS leads (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT NOT NULL,

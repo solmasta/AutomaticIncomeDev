@@ -26,6 +26,143 @@ const STATE_RULES = {
 
 const FILING_FEE_LABEL = "Claim filing assistance";
 
+// --- AI agents -------------------------------------------------------
+// Called via raw HTTP fetch to api.anthropic.com/resend.com, not their SDKs
+// -- this Worker is deliberately dependency-free (see the Stripe
+// integration for the same reasoning), which keeps `wrangler deploy`
+// simple and avoids introducing an npm bundle this project's CI hasn't
+// been set up to test. All three agents degrade gracefully: if a secret
+// key is missing or the call fails, the surrounding feature just skips
+// the AI step instead of breaking search/checkout/payment.
+
+async function sendEmail(env, { to, subject, html }) {
+  if (!env.RESEND_API_KEY) return { ok: false, error: "RESEND_API_KEY not configured" };
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: env.FROM_EMAIL || "onboarding@resend.dev",
+      to,
+      subject,
+      html,
+    }),
+  });
+  if (!res.ok) return { ok: false, error: await res.text() };
+  return { ok: true };
+}
+
+/** Agent 1: score how likely each search result is really the person who searched. */
+async function scoreMatchConfidence(searchedName, candidates, env) {
+  if (!env.ANTHROPIC_API_KEY || candidates.length === 0) return {};
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5",
+        max_tokens: 4096,
+        system:
+          "You verify identity matches for an unclaimed-property search tool. Given the name someone searched for and a list of candidate property records, score how likely each candidate is that same person, 0-100. Account for nicknames, middle initials, maiden names, and typos. Common names (e.g. \"John Smith\") should score lower without corroborating details like a matching city. Be conservative: overconfidence risks someone paying to file a claim that isn't theirs.",
+        messages: [
+          {
+            role: "user",
+            content: JSON.stringify({ searched_name: searchedName, candidates }),
+          },
+        ],
+        output_config: {
+          format: {
+            type: "json_schema",
+            schema: {
+              type: "object",
+              properties: {
+                matches: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      id: { type: "integer" },
+                      confidence: { type: "integer" },
+                      reason: { type: "string" },
+                    },
+                    required: ["id", "confidence", "reason"],
+                    additionalProperties: false,
+                  },
+                },
+              },
+              required: ["matches"],
+              additionalProperties: false,
+            },
+          },
+        },
+      }),
+    });
+    if (!res.ok) return {};
+    const data = await res.json();
+    const textBlock = (data.content || []).find((b) => b.type === "text");
+    if (!textBlock) return {};
+    const parsed = JSON.parse(textBlock.text);
+    const byId = {};
+    for (const m of parsed.matches || []) byId[m.id] = { confidence: m.confidence, reason: m.reason };
+    return byId;
+  } catch {
+    return {};
+  }
+}
+
+/** Agent 2: draft a filing cover letter + document checklist once someone's paid, and email it to the operator. */
+async function draftClaimPacket(lead, property, env) {
+  if (!env.ANTHROPIC_API_KEY) return null;
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-5",
+        max_tokens: 2048,
+        system:
+          "You draft claim-filing paperwork for a California unclaimed-property recovery service. Given a claimant's info and a property record, write (1) a short, professional cover letter to include with the mailed claim to the CA State Controller's Office, and (2) a checklist of documents the claimant will likely need to provide (e.g. government ID, proof of current address, SSN if requested). Explicitly note in the checklist that exact requirements should be verified against the state's current claim instructions before mailing, since requirements can change. Do not invent specific form field names or claim numbers you weren't given.",
+        messages: [
+          {
+            role: "user",
+            content: JSON.stringify({ claimant: lead, property }),
+          },
+        ],
+        output_config: {
+          format: {
+            type: "json_schema",
+            schema: {
+              type: "object",
+              properties: {
+                cover_letter: { type: "string" },
+                document_checklist: { type: "array", items: { type: "string" } },
+              },
+              required: ["cover_letter", "document_checklist"],
+              additionalProperties: false,
+            },
+          },
+        },
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const textBlock = (data.content || []).find((b) => b.type === "text");
+    return textBlock ? JSON.parse(textBlock.text) : null;
+  } catch {
+    return null;
+  }
+}
+
 function refundPolicyHtml(env, feeDisplay) {
   const supportEmail = env.SUPPORT_EMAIL || "support@example.com";
   return `
@@ -97,6 +234,12 @@ function htmlPage(env) {
   .lead-form input { flex: 1; min-width: 160px; padding: 8px 10px; border-radius: 6px; border: 1px solid #ccc; }
   .policy-note { flex-basis: 100%; font-size: 0.78rem; color: #888; }
   .policy-note a { color: inherit; }
+  .confidence { display: inline-block; font-size: 0.75rem; padding: 2px 8px; border-radius: 999px; margin-left: 8px; vertical-align: middle; }
+  .confidence.high { background: #d1fae5; color: #065f46; }
+  .confidence.medium { background: #fef3c7; color: #92400e; }
+  .confidence.low { background: #fee2e2; color: #991b1b; }
+  .watch-form { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .watch-form input { flex: 1; min-width: 160px; padding: 8px 10px; border-radius: 6px; border: 1px solid #ccc; }
 </style>
 </head>
 <body>
@@ -148,12 +291,38 @@ function htmlPage(env) {
         if (!res.ok) throw new Error(data.error || 'Search failed');
         if (data.results.length === 0) {
           status.textContent = 'No matches found for "' + name + '" in the California database yet.';
+          results.innerHTML = \`
+            <div class="card">
+              <div class="meta">New properties get reported to the state all the time. Want us to email you if "\${name}" shows up in a future weekly update?</div>
+              <form class="watch-form" id="watch-form">
+                <input type="text" name="full_name" placeholder="Full name" value="\${name}" required>
+                <input type="email" name="email" placeholder="Email" required>
+                <button type="submit">Notify me</button>
+              </form>
+            </div>\`;
+          document.getElementById('watch-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fd = new FormData(e.target);
+            await fetch('/api/watchlist', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ full_name: fd.get('full_name'), email: fd.get('email') }),
+            });
+            e.target.outerHTML = '<em>Thanks — we\\'ll email you if a match shows up.</em>';
+          });
           return;
         }
         status.textContent = data.results.length + ' possible match(es) found. Verify these are really you before doing anything.';
-        results.innerHTML = data.results.map((r) => \`
+        results.innerHTML = data.results.map((r) => {
+          let confBadge = '';
+          if (typeof r.confidence === 'number') {
+            const tier = r.confidence >= 75 ? 'high' : r.confidence >= 40 ? 'medium' : 'low';
+            const label = tier === 'high' ? 'Likely you' : tier === 'medium' ? 'Verify carefully' : 'Probably not you';
+            confBadge = '<span class="confidence ' + tier + '" title="' + (r.confidence_reason || '').replace(/"/g, '&quot;') + '">' + label + ' (' + r.confidence + '%)</span>';
+          }
+          return \`
           <div class="card">
-            <div class="amount">\${money(r.cash_reported || 0)}</div>
+            <div class="amount">\${money(r.cash_reported || 0)}\${confBadge}</div>
             <div class="meta">\${r.owner_name} — \${r.city || 'CA'} — held by \${r.holder_name || 'unknown holder'}</div>
             <div class="meta">Reported: \${r.reported_date || 'unknown'} \${r.can_solicit ? '' : '(too recent for us to offer paid help — claim it yourself for free)'}</div>
             <div class="cta">
@@ -167,7 +336,8 @@ function htmlPage(env) {
               <div class="policy-note">By paying you agree to our <a href="/refund-policy" target="_blank" rel="noopener">refund policy</a> — full refund any time before we file, non-refundable after.</div>
             </form>
           </div>
-        \`).join('');
+        \`;
+        }).join('');
 
         document.querySelectorAll('.ask-help').forEach((btn) => {
           btn.addEventListener('click', () => {
@@ -251,8 +421,59 @@ async function handleSearch(url, env) {
   ).bind(...params);
 
   const { results } = await stmt.all();
-  const enriched = results.map((r) => ({ ...r, can_solicit: canSolicit(r.state, r.reported_date) }));
+  const confidence = await scoreMatchConfidence(
+    name,
+    results.map((r) => ({ id: r.id, owner_name: r.owner_name, city: r.city, holder_name: r.holder_name })),
+    env
+  );
+  const enriched = results.map((r) => ({
+    ...r,
+    can_solicit: canSolicit(r.state, r.reported_date),
+    confidence: confidence[r.id]?.confidence ?? null,
+    confidence_reason: confidence[r.id]?.reason ?? null,
+  }));
   return Response.json({ results: enriched });
+}
+
+/** Agent 3: weekly watchlist sweep -- emails anyone watching a name that just got a match. */
+async function handleWatchlist(request, env) {
+  const body = await request.json().catch(() => null);
+  if (!body || !body.email || !body.full_name) {
+    return Response.json({ error: "email and full_name are required" }, { status: 400 });
+  }
+  await env.DB.prepare(`INSERT INTO watchlist (email, full_name, name_normalized) VALUES (?, ?, ?)`)
+    .bind(body.email, body.full_name, normalizeName(body.full_name))
+    .run();
+  return Response.json({ ok: true });
+}
+
+async function watchlistSweep(env) {
+  const { results: watchers } = await env.DB.prepare(
+    `SELECT id, email, full_name, name_normalized FROM watchlist WHERE notified_at IS NULL`
+  ).all();
+
+  for (const w of watchers) {
+    const tokens = w.name_normalized.split(" ").filter(Boolean).slice(0, 4);
+    if (tokens.length === 0) continue;
+    const conditions = tokens.map(() => "owner_name_normalized LIKE ?").join(" AND ");
+    const params = tokens.map((t) => `%${t}%`);
+    const { results: matches } = await env.DB.prepare(
+      `SELECT owner_name, city, holder_name, cash_reported FROM properties WHERE ${conditions} LIMIT 5`
+    )
+      .bind(...params)
+      .all();
+    if (matches.length === 0) continue;
+
+    const list = matches
+      .map((m) => `<li>$${(m.cash_reported || 0).toLocaleString()} — ${m.owner_name}, ${m.city || "CA"} (held by ${m.holder_name || "unknown"})</li>`)
+      .join("");
+    await sendEmail(env, {
+      to: w.email,
+      subject: "We found a possible unclaimed-money match for you",
+      html: `<p>Hi ${w.full_name},</p><p>A search for your name just turned up a possible match in California's unclaimed-property records:</p><ul>${list}</ul><p>Search again to verify and claim it: <a href="${env.SITE_URL || "#"}">${env.SITE_URL || "the site"}</a>.</p>`,
+    });
+    await env.DB.prepare(`UPDATE watchlist SET notified_at = datetime('now') WHERE id = ?`).bind(w.id).run();
+  }
 }
 
 /** Create a lead row + a Stripe Checkout Session for the flat filing fee. */
@@ -346,6 +567,28 @@ async function handleStripeWebhook(request, env) {
     )
       .bind(session.id)
       .run();
+
+    const lead = await env.DB.prepare(
+      `SELECT id, full_name, email, property_id FROM leads WHERE stripe_session_id = ?`
+    )
+      .bind(session.id)
+      .first();
+    if (lead) {
+      const property = lead.property_id
+        ? await env.DB.prepare(`SELECT owner_name, city, holder_name, property_type, cash_reported, reported_date FROM properties WHERE id = ?`)
+            .bind(lead.property_id)
+            .first()
+        : null;
+      const packet = await draftClaimPacket(lead, property, env);
+      if (packet && env.SUPPORT_EMAIL) {
+        const checklist = packet.document_checklist.map((item) => `<li>${item}</li>`).join("");
+        await sendEmail(env, {
+          to: env.SUPPORT_EMAIL,
+          subject: `New paid claim to file: ${lead.full_name}`,
+          html: `<p><strong>Claimant:</strong> ${lead.full_name} (${lead.email})</p><p><strong>Property:</strong> ${property ? `${property.owner_name} — $${property.cash_reported} — held by ${property.holder_name || "unknown"}` : "unknown"}</p><h3>Cover letter draft</h3><pre style="white-space:pre-wrap;font-family:inherit">${packet.cover_letter}</pre><h3>Document checklist</h3><ul>${checklist}</ul>`,
+        });
+      }
+    }
   }
   return Response.json({ received: true });
 }
@@ -368,6 +611,14 @@ export default {
     if (url.pathname === "/api/stripe-webhook" && request.method === "POST") {
       return handleStripeWebhook(request, env);
     }
+    if (url.pathname === "/api/watchlist" && request.method === "POST") {
+      return handleWatchlist(request, env);
+    }
     return new Response("Not found", { status: 404 });
+  },
+
+  /** Runs on the cron in wrangler.toml -- an hour after the weekly CA data refresh. */
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(watchlistSweep(env));
   },
 };
