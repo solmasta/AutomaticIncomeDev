@@ -54,25 +54,53 @@ that part's done. Everything else deploys itself via GitHub Actions:
 That's it — no `npm install -g wrangler`, no local login, nothing to run
 on your own machine.
 
+### How you get paid
+
+The site charges a **flat $29 filing-assistance fee via Stripe Checkout,
+upfront, before any work starts** — not a cut of what the state pays out.
+That's deliberate: the state mails the recovered money straight to the
+claimant, so a contingency ("we get paid only if you get paid") model has
+no real way to collect without a power-of-attorney + licensed/bonded
+finder setup, which needs a lawyer, not code. A flat fee paid before work
+begins has no collection problem — Stripe either charges the card or it
+doesn't, and `leads.paid` flips to `1` the moment it does.
+
+To turn payments on:
+1. Create a free Stripe account at stripe.com, grab your **secret key**
+   (dashboard → Developers → API keys).
+2. In the Cloudflare dashboard: Workers & Pages → `unclaimed-money-finder`
+   → Settings → Variables and Secrets → Add → name it
+   `STRIPE_SECRET_KEY`, paste the key, mark it **Encrypt**.
+3. In Stripe: Developers → Webhooks → Add endpoint →
+   `https://<your-worker>.workers.dev/api/stripe-webhook`, subscribe to
+   `checkout.session.completed`. Copy the **signing secret** it gives you.
+4. Add that as another encrypted Cloudflare variable:
+   `STRIPE_WEBHOOK_SECRET`.
+
+No local CLI needed for either — both are dashboard actions. Change the
+fee amount any time by editing `FILING_FEE_CENTS` in `app/wrangler.toml`
+(cents, so `2900` = $29) and pushing — the deploy workflow picks it up.
+
 ### What's automated vs. not
 
-- Automated: search, matching, lead capture, weekly data refresh.
-- **Not** automated: actually filing a claim. California requires a signed
-  claim form (sometimes notarized) mailed to the Controller's office —
-  that step still needs a human. The product's job is finding the money
-  and the lead; turning a lead into a filed, paid claim is still manual
-  work for now.
+- Automated: search, matching, payment collection, weekly data refresh.
+- **Not** automated: actually filing the claim once someone pays. California
+  requires a signed claim form (sometimes notarized) mailed to the
+  Controller's office — that step still needs a human. Check the `leads`
+  table (`paid = 1`) for who's paid and owed a filed claim.
 
 ### Legal — read before charging anyone a fee
 
-Most states cap what a "finder" can charge for helping someone claim
-unclaimed property (commonly 10–20%, varies by state), and several forbid
-soliciting a fee until the property has been reported for a minimum period
-(commonly ~24 months). `app/src/index.js` has a `STATE_RULES` table that
-encodes conservative defaults and is marked `verified: false` — **do not
-rely on those numbers**; confirm the current statute for any state you
-operate in (starting with California) before collecting a single dollar.
-This is not legal advice.
+The flat filing fee is a different legal category from a contingency
+"finder fee" (it's a paid document-prep service, not a cut of recovered
+property), which is what lets it sidestep most states' finder-fee percent
+caps. But several states still forbid *soliciting* any paid help — flat
+fee or not — until the property has been reported for a minimum period
+(commonly ~24 months), which is what `STATE_RULES` in `app/src/index.js`
+still gates on. It's marked `verified: false` on purpose — **do not rely
+on those numbers**; confirm the current statute for any state you operate
+in (starting with California) before collecting a single dollar. This is
+not legal advice.
 
 ### Scaling notes
 

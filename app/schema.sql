@@ -24,5 +24,8 @@ CREATE TABLE IF NOT EXISTS leads (
   full_name TEXT NOT NULL,
   property_id INTEGER REFERENCES properties(id),
   message TEXT,
+  stripe_session_id TEXT,
+  paid INTEGER NOT NULL DEFAULT 0,   -- flipped to 1 by the Stripe webhook on successful checkout
+  paid_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
