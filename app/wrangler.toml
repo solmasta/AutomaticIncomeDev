@@ -1,0 +1,27 @@
+name = "unclaimed-money-finder"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[vars]
+FILING_FEE_CENTS = "2900"
+SUPPORT_EMAIL = "REPLACE_WITH_YOUR_SUPPORT_EMAIL"
+FROM_EMAIL = "onboarding@resend.dev"
+SITE_URL = "REPLACE_WITH_YOUR_WORKERS_DEV_URL"
+
+# STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, ANTHROPIC_API_KEY, and
+# RESEND_API_KEY are secrets, not vars — set them via the Cloudflare
+# dashboard (Workers & Pages -> this worker -> Settings -> Variables and
+# Secrets -> Add -> Encrypt), never committed here.
+
+# Create the database first with:
+#   wrangler d1 create unclaimed_money_finder
+# then paste the database_id it prints below.
+[[d1_databases]]
+binding = "DB"
+database_name = "unclaimed_money_finder"
+database_id = "6aba0aea-0a67-4bd2-86c1-05866855e270"
+
+# Runs the watchlist-sweep agent weekly, an hour after the Friday CA data
+# refresh, so it's checking against that week's fresh data.
+[triggers]
+crons = ["0 14 * * 5"]

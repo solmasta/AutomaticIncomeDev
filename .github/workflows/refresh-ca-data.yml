@@ -1,0 +1,33 @@
+name: Refresh CA unclaimed property data
+
+on:
+  schedule:
+    # Fridays at 13:00 UTC — a day after CA's own Thursday data refresh.
+    - cron: "0 13 * * 5"
+  workflow_dispatch: {}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Fetch and transform CA unclaimed property data
+        run: node fetch_ca_unclaimed.js
+        working-directory: ingest
+
+      - name: Import into Cloudflare D1
+        working-directory: app
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npm install -g wrangler
+          for f in ../ingest/output/*.sql; do
+            echo "Applying $f"
+            wrangler d1 execute unclaimed_money_finder --remote --file="$f"
+          done
