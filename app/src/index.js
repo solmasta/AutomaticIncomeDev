@@ -386,6 +386,10 @@ function htmlPage(env) {
             const tier = r.confidence >= 75 ? 'high' : r.confidence >= 40 ? 'medium' : 'low';
             const label = tier === 'high' ? 'Likely you' : tier === 'medium' ? 'Verify carefully' : 'Probably not you';
             confBadge = '<span class="confidence ' + tier + '" title="' + (r.confidence_reason || '').replace(/"/g, '&quot;') + '">' + label + ' (' + r.confidence + '%)</span>';
+          } else if (r.match_tier === 'nickname') {
+            confBadge = '<span class="confidence medium" title="Matched via a common nickname/formal-name variant, not your exact search terms">Nickname match</span>';
+          } else if (r.match_tier === 'partial') {
+            confBadge = '<span class="confidence low" title="Only part of your search matched this record — double check it\\'s really you">Partial match</span>';
           }
           return \`
           <div class="card">
@@ -468,6 +472,72 @@ function canSolicit(state, reportedDate) {
   return monthsAgo >= rule.soliciteWaitMonths;
 }
 
+// Common English nickname/formal-name groups, so searching either "Bob Smith"
+// or "Robert Smith" finds a record filed under the other form. Deliberately
+// not exhaustive -- covers the names common enough to matter for a general
+// search tool, not a linguistics project.
+const NICKNAME_GROUPS = [
+  ["ROBERT", "BOB", "BOBBY", "ROB", "ROBBIE"],
+  ["WILLIAM", "BILL", "BILLY", "WILL", "WILLIE"],
+  ["RICHARD", "RICK", "RICKY", "DICK", "RICH"],
+  ["JAMES", "JIM", "JIMMY", "JAMIE"],
+  ["MICHAEL", "MIKE", "MICKEY"],
+  ["ELIZABETH", "LIZ", "BETH", "LIZZIE", "BETTY", "ELIZA"],
+  ["CHARLES", "CHUCK", "CHARLIE"],
+  ["ANTHONY", "TONY"],
+  ["THOMAS", "TOM", "TOMMY"],
+  ["DAVID", "DAVE", "DAVEY"],
+  ["STEVEN", "STEPHEN", "STEVE"],
+  ["KENNETH", "KEN", "KENNY"],
+  ["RONALD", "RON", "RONNIE"],
+  ["DONALD", "DON", "DONNIE"],
+  ["EDWARD", "ED", "EDDIE", "TED"],
+  ["FREDERICK", "FRED", "FREDDIE"],
+  ["GREGORY", "GREG"],
+  ["JEFFREY", "JEFF"],
+  ["JOSEPH", "JOE", "JOEY"],
+  ["LAWRENCE", "LARRY"],
+  ["MATTHEW", "MATT"],
+  ["NICHOLAS", "NICK", "NICKY"],
+  ["PATRICK", "PAT", "PATTY"],
+  ["SAMUEL", "SAM", "SAMMY"],
+  ["SUSAN", "SUE", "SUZY"],
+  ["ANDREW", "ANDY", "DREW"],
+  ["ALEXANDER", "ALEX"],
+  ["BENJAMIN", "BEN", "BENNY"],
+  ["DANIEL", "DAN", "DANNY"],
+  ["JENNIFER", "JEN", "JENNY", "JENN"],
+  ["KATHERINE", "CATHERINE", "KATE", "KATIE", "KATHY", "CATHY"],
+  ["MARGARET", "MEG", "MAGGIE", "PEGGY"],
+  ["PATRICIA", "TRISH"],
+  ["DEBORAH", "DEB", "DEBBIE"],
+  ["BARBARA", "BARB", "BARBIE"],
+  ["CHRISTOPHER", "CHRIS"],
+  ["TIMOTHY", "TIM", "TIMMY"],
+  ["GERALD", "GERRY", "JERRY"],
+  ["RAYMOND", "RAY"],
+  ["FRANCIS", "FRANK", "FRANKIE"],
+  ["FRANCES", "FRAN", "FRANNIE"],
+  ["VICTORIA", "VICKY", "TORI"],
+  ["REBECCA", "BECKY"],
+  ["CYNTHIA", "CINDY"],
+  ["DOROTHY", "DOT", "DOTTIE"],
+];
+const NICKNAME_MAP = Object.fromEntries(NICKNAME_GROUPS.flatMap((g) => g.map((n) => [n, g])));
+
+async function runTokenQuery(env, tokens) {
+  const conditions = tokens.map(() => "owner_name_normalized LIKE ?").join(" AND ");
+  const params = tokens.map((t) => `%${t}%`);
+  const { results } = await env.DB.prepare(
+    `SELECT id, owner_name, city, state, holder_name, property_type, cash_reported, reported_date
+     FROM properties WHERE ${conditions}
+     ORDER BY cash_reported DESC LIMIT 25`
+  )
+    .bind(...params)
+    .all();
+  return results;
+}
+
 async function handleSearch(url, env) {
   const name = (url.searchParams.get("name") || "").trim();
   if (name.length < 2) {
@@ -479,15 +549,41 @@ async function handleSearch(url, env) {
     return Response.json({ error: "Enter a name" }, { status: 400 });
   }
 
-  const conditions = tokens.map(() => "owner_name_normalized LIKE ?").join(" AND ");
-  const params = tokens.map((t) => `%${t}%`);
-  const stmt = env.DB.prepare(
-    `SELECT id, owner_name, city, state, holder_name, property_type, cash_reported, reported_date
-     FROM properties WHERE ${conditions}
-     ORDER BY cash_reported DESC LIMIT 25`
-  ).bind(...params);
+  // Tier 1: every token must match -- the precise, high-confidence case.
+  const exact = await runTokenQuery(env, tokens);
+  const seen = new Set(exact.map((r) => r.id));
+  let results = exact.map((r) => ({ ...r, match_tier: "exact" }));
 
-  const { results } = await stmt.all();
+  // Tier 2: substitute known nickname/formal-name variants (only fires when
+  // tier 1 came up thin) -- catches "Bob Smith" vs. a record filed as
+  // "Robert Smith", in either direction.
+  if (results.length === 0) {
+    const variantQueries = [];
+    for (let i = 0; i < tokens.length; i++) {
+      for (const variant of NICKNAME_MAP[tokens[i]] || []) {
+        if (variant === tokens[i]) continue;
+        const variantTokens = [...tokens];
+        variantTokens[i] = variant;
+        variantQueries.push(runTokenQuery(env, variantTokens));
+      }
+    }
+    for (const batch of await Promise.all(variantQueries)) {
+      for (const r of batch) if (!seen.has(r.id)) { seen.add(r.id); results.push({ ...r, match_tier: "nickname" }); }
+    }
+  }
+
+  // Tier 3: drop exactly one token (a middle initial, a dropped nickname
+  // that isn't in the map, a truncated name) -- broader net, lower
+  // confidence, only used as a last resort when tiers 1-2 are still thin.
+  if (results.length === 0 && tokens.length > 1) {
+    const subsetQueries = tokens.map((_, i) => runTokenQuery(env, tokens.filter((_, idx) => idx !== i)));
+    for (const batch of await Promise.all(subsetQueries)) {
+      for (const r of batch) if (!seen.has(r.id)) { seen.add(r.id); results.push({ ...r, match_tier: "partial" }); }
+    }
+  }
+
+  results = results.slice(0, 25);
+
   const confidence = await scoreMatchConfidence(
     name,
     results.map((r) => ({ id: r.id, owner_name: r.owner_name, city: r.city, holder_name: r.holder_name })),
