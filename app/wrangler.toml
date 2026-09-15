@@ -4,7 +4,7 @@ compatibility_date = "2026-09-01"
 
 [vars]
 FILING_FEE_CENTS = "2900"
-SUPPORT_EMAIL = "REPLACE_WITH_YOUR_SUPPORT_EMAIL"
+SUPPORT_EMAIL = "lukedorsett@hotmail.com"
 FROM_EMAIL = "onboarding@resend.dev"
 SITE_URL = "https://unclaimed-money-finder.lukedorsett.workers.dev"
 
