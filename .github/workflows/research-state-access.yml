@@ -22,3 +22,7 @@ jobs:
       - name: Verify NAUPA/MissingMoney URLs
         run: node research_naupa.js
         working-directory: ingest
+
+      - name: Verify CA safe-deposit-box auction program
+        run: node research_sco_auctions.js
+        working-directory: ingest
