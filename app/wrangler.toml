@@ -6,7 +6,7 @@ compatibility_date = "2026-09-01"
 FILING_FEE_CENTS = "2900"
 SUPPORT_EMAIL = "REPLACE_WITH_YOUR_SUPPORT_EMAIL"
 FROM_EMAIL = "onboarding@resend.dev"
-SITE_URL = "REPLACE_WITH_YOUR_WORKERS_DEV_URL"
+SITE_URL = "https://unclaimed-money-finder.lukedorsett.workers.dev"
 
 # STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, ANTHROPIC_API_KEY, and
 # RESEND_API_KEY are secrets, not vars — set them via the Cloudflare
