@@ -35,7 +35,15 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           npm install -g wrangler
+          failed=0
           for f in ../ingest/output/*.sql; do
             echo "Applying $f"
-            wrangler d1 execute unclaimed_money_finder --remote --file="$f"
+            if ! wrangler d1 execute unclaimed_money_finder --remote --file="$f"; then
+              echo "::warning::Failed to apply $f -- continuing with remaining batches"
+              failed=$((failed + 1))
+            fi
           done
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::$failed batch file(s) failed to apply -- see warnings above for which ones"
+            exit 1
+          fi
