@@ -14,7 +14,11 @@
 //   CSV_URL_OVERRIDE    skip auto-discovery and use this URL directly
 //   MIN_CASH            default: 500 (only keep properties worth pursuing)
 //   OUTPUT_DIR          default: ingest/output
-//   BATCH_SIZE          default: 300 rows per SQL INSERT batch
+//   BATCH_SIZE          default: 100 rows per single INSERT statement (D1's
+//                       per-statement size limit rejected 1000; 100 confirmed OK)
+//   STATEMENTS_PER_FILE default: 50 statements bundled per SQL file, so each
+//                       `wrangler d1 execute` CLI invocation applies many
+//                       statements at once instead of one process per batch
 
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
@@ -27,9 +31,13 @@ import path from "node:path";
 const DOWNLOAD_PAGE_URL =
   process.env.DOWNLOAD_PAGE_URL || "https://sco.ca.gov/upd_download_property_records.html";
 const MIN_CASH = Number(process.env.MIN_CASH || 500);
-const OUTPUT_DIR = process.env.OUTPUT_DIR || path.join("ingest", "output");
+// Defaults assume this script runs with its own directory (ingest/) as the
+// cwd -- true both when run locally as `node fetch_ca_unclaimed.js` from
+// inside ingest/, and in the GitHub Actions workflow, which sets
+// working-directory: ingest for this step. Don't re-prefix "ingest" here.
+const OUTPUT_DIR = process.env.OUTPUT_DIR || "output";
 const BATCH_SIZE = Number(process.env.BATCH_SIZE || 300);
-const TMP_DIR = path.join("ingest", "tmp");
+const TMP_DIR = "tmp";
 
 async function fetchText(url) {
   const res = await fetch(url, { headers: { "user-agent": "unclaimed-money-finder-ingest/1.0" } });
@@ -81,8 +89,8 @@ async function findCsv(dir) {
   return null;
 }
 
-/** Minimal RFC4180-ish line parser: handles quoted fields with embedded commas/quotes. */
-function parseCsvLine(line) {
+/** Minimal RFC4180-ish line parser: handles quoted fields with embedded delimiters/quotes. */
+function parseDelimitedLine(line, delimiter) {
   const fields = [];
   let cur = "";
   let inQuotes = false;
@@ -101,7 +109,7 @@ function parseCsvLine(line) {
       }
     } else if (ch === '"') {
       inQuotes = true;
-    } else if (ch === ",") {
+    } else if (ch === delimiter) {
       fields.push(cur);
       cur = "";
     } else {
@@ -110,6 +118,37 @@ function parseCsvLine(line) {
   }
   fields.push(cur);
   return fields.map((f) => f.trim());
+}
+
+/** CA's public bulk file turned out to be pipe-delimited NAUPA-standard export with NO
+ * header row (discovered against the real 04_From_500_To_Beyond.zip file) -- confirmed
+ * by inspecting an actual data row: fixed field positions below, verified against it.
+ * Comma-delimited-with-header files (an older assumption, kept as a fallback in case a
+ * future refresh reverts format) are still auto-detected and handled the old way. */
+function detectDelimiter(line) {
+  // A literal pipe character essentially never shows up in ordinary name/address
+  // text, so "any pipes at all" is a far more reliable signal than comparing
+  // raw pipe vs. comma counts -- a comma-containing address ("123 MAIN ST, APT 2")
+  // could otherwise outnumber pipes on an actually-pipe-delimited line and cause
+  // a misdetection that silently scrambles every field for the whole file.
+  return line.includes("|") ? "|" : ",";
+}
+
+const NAUPA_FIXED_FIELDS = {
+  sourceRowId: 0,
+  propertyType: 1,
+  cashReported: 2,
+  ownerName: 6,
+  city: 10,
+  holderName: 17,
+  // No report/void date is exposed in this public extract at all -- reportedDate is
+  // left null for NAUPA-format rows. See README for what that means for the
+  // solicitation-wait-period gate.
+};
+
+function looksLikeHeaderRow(fields) {
+  const joined = fields.join(" ").toLowerCase();
+  return joined.includes("owner") && joined.includes("name");
 }
 
 function buildHeaderMap(headers) {
@@ -171,25 +210,50 @@ async function main() {
 
   const rl = createInterface({ input: createReadStream(csvPath, { encoding: "utf8" }) });
   let headerMap = null;
+  let delimiter = null;
+  let fixedFormat = false;
   let batch = [];
   let batchIndex = 0;
   let totalKept = 0;
   let totalSeen = 0;
 
-  const flushBatch = async () => {
-    if (batch.length === 0) return;
-    const values = batch
+  // Two-level batching: each INSERT statement holds STATEMENT_ROWS rows (kept
+  // well under D1's per-statement size limit -- 1000 rows tripped SQLITE_TOOBIG,
+  // 100 is confirmed safe against the real schema/data), but many statements
+  // get bundled into one file so `wrangler d1 execute` processes them in a
+  // single CLI invocation. At 100 rows/statement and one invocation per file,
+  // importing CA's full ~760k-row $500+ file would mean ~7,600 separate
+  // `wrangler` process launches (each with real CLI-startup + network
+  // overhead) -- realistically hours. Bundling STATEMENTS_PER_FILE statements
+  // per file cuts that to ~STATEMENTS_PER_FILE-times fewer invocations.
+  const STATEMENT_ROWS = BATCH_SIZE;
+  const STATEMENTS_PER_FILE = Number(process.env.STATEMENTS_PER_FILE || 50);
+  let fileStatements = [];
+
+  const buildStatement = (rows) => {
+    const values = rows
       .map(
         (r) =>
           `(${sqlEscape(r.ownerName)}, ${sqlEscape(normalizeName(r.ownerName))}, ${sqlEscape(r.city)}, 'CA', ${sqlEscape(r.holderName)}, ${sqlEscape(r.propertyType)}, ${r.cashReported}, ${sqlEscape(r.reportedDate)})`
       )
       .join(",\n  ");
-    const sql =
-      `INSERT INTO properties (owner_name, owner_name_normalized, city, state, holder_name, property_type, cash_reported, reported_date)\nVALUES\n  ${values};\n`;
+    return `INSERT INTO properties (owner_name, owner_name_normalized, city, state, holder_name, property_type, cash_reported, reported_date)\nVALUES\n  ${values};\n`;
+  };
+
+  const flushFile = async () => {
+    if (fileStatements.length === 0) return;
     const fileName = path.join(OUTPUT_DIR, `${String(batchIndex).padStart(5, "0")}_ca_batch.sql`);
-    await writeFile(fileName, sql, "utf8");
+    await writeFile(fileName, fileStatements.join("\n"), "utf8");
     batchIndex++;
-    batch = [];
+    fileStatements = [];
+  };
+
+  const flushBatch = async () => {
+    if (batch.length > 0) {
+      fileStatements.push(buildStatement(batch));
+      batch = [];
+    }
+    if (fileStatements.length >= STATEMENTS_PER_FILE) await flushFile();
   };
 
   // First batch resets CA rows so the weekly sync doesn't accumulate stale duplicates.
@@ -198,38 +262,74 @@ async function main() {
 
   for await (const rawLine of rl) {
     if (!rawLine) continue;
-    const fields = parseCsvLine(rawLine);
-    if (!headerMap) {
-      headerMap = buildHeaderMap(fields);
-      if (headerMap.ownerName < 0) {
-        throw new Error(
-          `Could not find an owner-name column in headers: ${fields.join(" | ")}. ` +
-            "Update buildHeaderMap() to match the real column name."
-        );
+
+    if (delimiter === null) {
+      delimiter = detectDelimiter(rawLine);
+      const firstFields = parseDelimitedLine(rawLine, delimiter);
+      if (looksLikeHeaderRow(firstFields)) {
+        headerMap = buildHeaderMap(firstFields);
+        if (headerMap.ownerName < 0) {
+          throw new Error(
+            `Header row detected but no owner-name column found: ${firstFields.join(" | ")}. ` +
+              "Update buildHeaderMap() to match the real column name."
+          );
+        }
+        continue; // consumed as the header row, not a data row
       }
-      continue;
+      // No header row -- this file is the fixed-position NAUPA format, and this
+      // first line is already a data row, so fall through and parse it below.
+      fixedFormat = true;
     }
+
+    const fields = parseDelimitedLine(rawLine, delimiter);
     totalSeen++;
-    const ownerName = fields[headerMap.ownerName];
-    const cashRaw = headerMap.cashReported >= 0 ? fields[headerMap.cashReported] : "";
-    const cashReported = Number(String(cashRaw).replace(/[^0-9.]/g, "")) || 0;
+
+    let ownerName, city, holderName, propertyType, cashReported, reportedDate;
+    if (fixedFormat) {
+      ownerName = fields[NAUPA_FIXED_FIELDS.ownerName];
+      city = fields[NAUPA_FIXED_FIELDS.city] || "";
+      holderName = fields[NAUPA_FIXED_FIELDS.holderName] || "";
+      propertyType = fields[NAUPA_FIXED_FIELDS.propertyType] || "";
+      cashReported = Number(String(fields[NAUPA_FIXED_FIELDS.cashReported] || "").replace(/[^0-9.]/g, "")) || 0;
+      reportedDate = ""; // not present in this public extract
+    } else {
+      ownerName = fields[headerMap.ownerName];
+      city = headerMap.city >= 0 ? fields[headerMap.city] : "";
+      holderName = headerMap.holderName >= 0 ? fields[headerMap.holderName] : "";
+      propertyType = headerMap.propertyType >= 0 ? fields[headerMap.propertyType] : "";
+      cashReported = Number(String(headerMap.cashReported >= 0 ? fields[headerMap.cashReported] : "").replace(/[^0-9.]/g, "")) || 0;
+      reportedDate = headerMap.reportedDate >= 0 ? fields[headerMap.reportedDate] : "";
+    }
+
     if (!ownerName || cashReported < MIN_CASH) continue;
 
-    batch.push({
-      ownerName,
-      city: headerMap.city >= 0 ? fields[headerMap.city] : "",
-      holderName: headerMap.holderName >= 0 ? fields[headerMap.holderName] : "",
-      propertyType: headerMap.propertyType >= 0 ? fields[headerMap.propertyType] : "",
-      cashReported,
-      reportedDate: headerMap.reportedDate >= 0 ? fields[headerMap.reportedDate] : "",
-    });
+    // Some real owner names strip down to nothing once normalized (e.g. purely
+    // punctuation/non-Latin text) -- owner_name_normalized is NOT NULL in the
+    // schema, and such a record wouldn't be findable by name search anyway, so
+    // skip it rather than let sqlEscape("") silently emit a literal NULL and
+    // blow up the whole batch's INSERT on a constraint violation.
+    if (!normalizeName(ownerName)) continue;
+
+    if (totalKept === 0) {
+      // Print the first real row that will actually be imported so a human can
+      // eyeball it in the Actions log and confirm fields landed in the right
+      // places before trusting the rest of the run.
+      console.log(
+        `Format detected: ${fixedFormat ? "fixed-position NAUPA" : "header-based CSV"}, delimiter ${JSON.stringify(delimiter)}.\n` +
+          `Sample parsed row -> owner: ${JSON.stringify(ownerName)}, city: ${JSON.stringify(city)}, ` +
+          `holder: ${JSON.stringify(holderName)}, cash: ${cashReported}, type: ${JSON.stringify(propertyType)}`
+      );
+    }
+
+    batch.push({ ownerName, city, holderName, propertyType, cashReported, reportedDate });
     totalKept++;
-    if (batch.length >= BATCH_SIZE) await flushBatch();
+    if (batch.length >= STATEMENT_ROWS) await flushBatch();
   }
-  await flushBatch();
+  await flushBatch(); // pushes any partial trailing statement into fileStatements
+  await flushFile(); // writes any partial trailing file (< STATEMENTS_PER_FILE statements)
 
   console.log(`Done. Scanned ${totalSeen} rows, kept ${totalKept} at >= $${MIN_CASH}.`);
-  console.log(`Wrote ${batchIndex} SQL files to ${OUTPUT_DIR}/`);
+  console.log(`Wrote ${batchIndex - 1} SQL batch file(s) to ${OUTPUT_DIR}/ (${STATEMENT_ROWS} rows/statement, up to ${STATEMENTS_PER_FILE} statements/file).`);
 }
 
 main().catch((err) => {

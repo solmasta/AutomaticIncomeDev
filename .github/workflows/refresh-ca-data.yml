@@ -19,6 +19,14 @@ jobs:
       - name: Fetch and transform CA unclaimed property data
         run: node fetch_ca_unclaimed.js
         working-directory: ingest
+        env:
+          # Full $500+ coverage (~760k rows) is viable now that the account is
+          # on a paid plan (removes D1 free tier's ~100k rows/day write cap)
+          # and the ingest script bundles many INSERT statements per file
+          # (~153 files instead of ~7,600 separate `wrangler` invocations).
+          MIN_CASH: "500"
+          BATCH_SIZE: "100"
+          STATEMENTS_PER_FILE: "50"
 
       - name: Import into Cloudflare D1
         working-directory: app
@@ -27,7 +35,15 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           npm install -g wrangler
+          failed=0
           for f in ../ingest/output/*.sql; do
             echo "Applying $f"
-            wrangler d1 execute unclaimed_money_finder --remote --file="$f"
+            if ! wrangler d1 execute unclaimed_money_finder --remote --file="$f"; then
+              echo "::warning::Failed to apply $f -- continuing with remaining batches"
+              failed=$((failed + 1))
+            fi
           done
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::$failed batch file(s) failed to apply -- see warnings above for which ones"
+            exit 1
+          fi
