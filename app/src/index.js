@@ -859,6 +859,20 @@ export default {
     if (url.pathname === "/api/watchlist" && request.method === "POST") {
       return handleWatchlist(request, env);
     }
+    // Debug-only: manually fire one round of state research on demand, instead
+    // of waiting for the weekly cron, so a newly-added ANTHROPIC_API_KEY can
+    // be verified immediately. Gated behind ADMIN_KEY if one is set; remove
+    // this route (or set ADMIN_KEY) once you're done testing.
+    if (url.pathname === "/api/admin/run-coverage-sweep" && request.method === "GET") {
+      if (env.ADMIN_KEY && url.searchParams.get("key") !== env.ADMIN_KEY) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+      if (!env.ANTHROPIC_API_KEY) {
+        return Response.json({ ran: false, reason: "ANTHROPIC_API_KEY not set" }, { status: 200 });
+      }
+      await stateCoverageSweep(env, 1);
+      return Response.json({ ran: true });
+    }
     return new Response("Not found", { status: 404 });
   },
 
