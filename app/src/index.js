@@ -163,6 +163,85 @@ async function draftClaimPacket(lead, property, env) {
   }
 }
 
+/** Agent 4: research one state's real unclaimed-property + auction access using
+ * Claude's web_search/web_fetch tools -- it fetches the state's own official
+ * pages itself rather than relying on training data or a hand-maintained list,
+ * so /states can grow past the handful of states verified manually this
+ * session. Findings land in state_coverage for a human to spot-check; a wrong
+ * or low-confidence result just shows up as such, it never silently becomes a
+ * scraping integration without someone looking at it first. */
+async function researchStateCoverage(env, stateCode, stateName) {
+  if (!env.ANTHROPIC_API_KEY) return null;
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-5",
+        max_tokens: 8000,
+        system:
+          "You are a careful research agent verifying, for a single US state, (1) how its unclaimed-property program can actually be accessed by an automated tool -- a genuinely open bulk-downloadable dataset like California's, a live search form with no CAPTCHA or bot-detection, CAPTCHA-blocked, bot-detection-blocked (device fingerprinting, honeypot fields), or a JavaScript app whose backend you can't determine from a static fetch -- and (2) whether the state runs, directly or via a named and verifiable vendor, a legitimate public auction for unclaimed safe-deposit-box or other tangible property (like California's Lone Star Auctioneers program). " +
+          "Use your web_search and web_fetch tools to find and directly fetch the state's own official .gov page(s) yourself -- never rely on a search-result snippet alone, and never guess or fabricate a URL. Only report a URL as verified if you actually fetched it and saw real content confirming it. Note any CAPTCHA (recaptcha/hcaptcha/turnstile) or bot-detection signal you actually observed in fetched HTML, not ones you assume. Be conservative: if you're not confident, say exactly what you checked and why you're unsure in the notes, rather than guessing.\n\n" +
+          "When done, respond with ONLY a single JSON object (no other text, no markdown fences) with exactly these fields: cash_search_type (one of \"bulk_download\", \"live_form_open\", \"captcha_blocked\", \"bot_detected\", \"js_app_unknown\"), cash_search_url (string or null), cash_search_notes (string or null), auction_vendor_verified (true or false), auction_vendor_url (string or null), auction_notes (string or null), confidence (a short string naming exactly what you fetched/checked).",
+        messages: [{ role: "user", content: `Research state: ${stateName} (${stateCode}).` }],
+        tools: [
+          { type: "web_search_20260209", name: "web_search", max_uses: 5 },
+          { type: "web_fetch_20260209", name: "web_fetch", max_uses: 5, max_content_tokens: 3000 },
+        ],
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const textBlocks = (data.content || []).filter((b) => b.type === "text");
+    const lastText = textBlocks[textBlocks.length - 1]?.text || "";
+    const match = lastText.match(/\{[\s\S]*\}/);
+    return match ? JSON.parse(match[0]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Runs a small batch of state research per sweep (bounded cost/latency) --
+ * re-checks the stalest/never-checked states first, so a full first pass
+ * across all 50 states + DC happens gradually rather than all at once. */
+async function stateCoverageSweep(env, batchSize = 2) {
+  const { results: candidates } = await env.DB.prepare(
+    `SELECT state, state_name FROM state_coverage
+     WHERE last_checked_at IS NULL OR last_checked_at < datetime('now', '-90 days')
+     ORDER BY (last_checked_at IS NULL) DESC, last_checked_at ASC
+     LIMIT ?`
+  )
+    .bind(batchSize)
+    .all();
+
+  for (const s of candidates) {
+    const findings = await researchStateCoverage(env, s.state, s.state_name);
+    if (!findings) continue;
+    await env.DB.prepare(
+      `UPDATE state_coverage SET
+         cash_search_type = ?, cash_search_url = ?, cash_search_notes = ?,
+         auction_vendor_verified = ?, auction_vendor_url = ?, auction_notes = ?,
+         last_checked_at = datetime('now'), checked_by = 'agent', confidence = ?
+       WHERE state = ?`
+    )
+      .bind(
+        findings.cash_search_type || "unchecked",
+        findings.cash_search_url || null,
+        findings.cash_search_notes || null,
+        findings.auction_vendor_verified ? 1 : 0,
+        findings.auction_vendor_url || null,
+        findings.auction_notes || null,
+        findings.confidence || null,
+        s.state
+      )
+      .run();
+  }
+}
+
 function refundPolicyHtml(env, feeDisplay) {
   const supportEmail = env.SUPPORT_EMAIL || "support@example.com";
   return `
@@ -201,47 +280,47 @@ function refundPolicyPage(env) {
 </html>`;
 }
 
-// Only sources actually verified live (fetched and inspected, not guessed):
-// CA has its own full search built into this site; TX/FL/NY/PA/IL each have
-// a confirmed official state portal; NAUPA's national search (unclaimed.org)
-// is the verified fallback for every other state -- it's the clearinghouse
-// endorsed by state unclaimed-property administrators, confirmed reachable
-// with no CAPTCHA/bot-block on a plain fetch. Some individual state sites
-// (e.g. Florida) are reCAPTCHA-gated and MissingMoney.com blocks scripted
-// requests outright -- none of that stops a human from clicking through in
-// their own browser, which is all a directory link needs.
+// The national NAUPA clearinghouse (unclaimed.org) is the verified fallback
+// for cash search on any state the coverage agent hasn't confirmed a direct
+// link for -- reachable with no CAPTCHA/bot-block on a plain fetch, and it's
+// the clearinghouse endorsed by state unclaimed-property administrators.
 const NAUPA_SEARCH_URL = "https://unclaimed.org/search/";
-const STATE_DIRECTORY = [
-  { name: "Alabama" }, { name: "Alaska" }, { name: "Arizona" }, { name: "Arkansas" },
-  { name: "California", url: "/", note: "Full search built into this site" },
-  { name: "Colorado" }, { name: "Connecticut" }, { name: "Delaware" },
-  { name: "District of Columbia" },
-  { name: "Florida", url: "https://www.fltreasurehunt.gov/" },
-  { name: "Georgia" }, { name: "Hawaii" }, { name: "Idaho" },
-  { name: "Illinois", url: "https://icash.illinoistreasurer.gov/" },
-  { name: "Indiana" }, { name: "Iowa" }, { name: "Kansas" }, { name: "Kentucky" },
-  { name: "Louisiana" }, { name: "Maine" }, { name: "Maryland" }, { name: "Massachusetts" },
-  { name: "Michigan" }, { name: "Minnesota" }, { name: "Mississippi" }, { name: "Missouri" },
-  { name: "Montana" }, { name: "Nebraska" }, { name: "Nevada" }, { name: "New Hampshire" },
-  { name: "New Jersey" }, { name: "New Mexico" },
-  { name: "New York", url: "https://www.osc.ny.gov/unclaimed-funds" },
-  { name: "North Carolina" }, { name: "North Dakota" }, { name: "Ohio" }, { name: "Oklahoma" },
-  { name: "Oregon" },
-  { name: "Pennsylvania", url: "https://www.patreasury.gov/unclaimed-property/" },
-  { name: "Rhode Island" }, { name: "South Carolina" }, { name: "South Dakota" },
-  { name: "Tennessee" },
-  { name: "Texas", url: "https://www.claimittexas.gov/" },
-  { name: "Utah" }, { name: "Vermont" }, { name: "Virginia" }, { name: "Washington" },
-  { name: "West Virginia" }, { name: "Wisconsin" }, { name: "Wyoming" },
-];
 
-function statesPage() {
-  const rows = STATE_DIRECTORY.map((s) => {
-    const url = s.url || NAUPA_SEARCH_URL;
-    const label = s.url ? "Official state site →" : "Search via NAUPA →";
-    const note = s.note ? `<div class="meta">${s.note}</div>` : "";
-    return `<div class="row"><span>${s.name}</span><span><a href="${url}"${s.url === "/" ? "" : ' target="_blank" rel="noopener"'}>${label}</a>${note}</span></div>`;
-  }).join("");
+const CASH_SEARCH_LABELS = {
+  bulk_download: "Official state site →",
+  live_form_open: "Official state site →",
+  captcha_blocked: "Official state site →",
+  bot_detected: "Official state site →",
+  js_app_unknown: "Official state site →",
+};
+
+function statesRowHtml(s) {
+  const isCA = s.state === "CA";
+  const cashUrl = isCA ? "/" : s.cash_search_url || NAUPA_SEARCH_URL;
+  const cashLabel = isCA
+    ? "Full search built into this site"
+    : s.cash_search_url
+    ? CASH_SEARCH_LABELS[s.cash_search_type] || "Official state site →"
+    : "Search via NAUPA →";
+  const auctionLink = s.auction_vendor_verified && s.auction_vendor_url
+    ? `<div class="meta"><a href="${s.auction_vendor_url}" target="_blank" rel="noopener">Safe-deposit-box auction listings →</a></div>`
+    : "";
+  return `<div class="row">
+    <span>${s.state_name}</span>
+    <span>
+      <a href="${cashUrl}"${cashUrl === "/" ? "" : ' target="_blank" rel="noopener"'}>${cashLabel}</a>
+      ${auctionLink}
+    </span>
+  </div>`;
+}
+
+async function statesPage(env) {
+  const { results } = await env.DB.prepare(
+    `SELECT state, state_name, cash_search_type, cash_search_url, auction_vendor_verified, auction_vendor_url
+     FROM state_coverage ORDER BY state_name ASC`
+  ).all();
+  const rows = results.map(statesRowHtml).join("");
+  const uncheckedCount = results.filter((s) => s.cash_search_type === "unchecked").length;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -261,9 +340,9 @@ function statesPage() {
 <body>
   <p><a href="/">&larr; Back to California search</a></p>
   <h1>Unclaimed Property by State</h1>
-  <p>This site's own free search only covers California. For every other state, here's a direct link to that state's own official search tool (or the national NAUPA clearinghouse, where a state doesn't have its own confirmed direct link) — all free, no signup.</p>
+  <p>This site's own free search only covers California. For every other state, here's a direct link to that state's own official search tool (or the national NAUPA clearinghouse, where we haven't confirmed a state's own direct link yet) — all free, no signup. A research agent keeps checking for more states and for legitimate safe-deposit-box auction programs over time${uncheckedCount ? ` (${uncheckedCount} states not yet individually checked)` : ""}.</p>
   ${rows}
-  <div class="disclosure">Links go to official state or NAUPA (National Association of Unclaimed Property Administrators) sites. We don't operate or control them, and don't offer paid filing help for any state but California.</div>
+  <div class="disclosure">Links go to official state, NAUPA, or a verified official state auction vendor. We don't operate or control any of them, don't take bids or hold money for any auctioned property, and don't offer paid filing help for any state but California.</div>
 </body>
 </html>`;
 }
@@ -766,7 +845,7 @@ export default {
       return new Response(refundPolicyPage(env), { headers: { "content-type": "text/html; charset=utf-8" } });
     }
     if (url.pathname === "/states") {
-      return new Response(statesPage(), { headers: { "content-type": "text/html; charset=utf-8" } });
+      return new Response(await statesPage(env), { headers: { "content-type": "text/html; charset=utf-8" } });
     }
     if (url.pathname === "/api/search" && request.method === "GET") {
       return handleSearch(url, env);
@@ -786,5 +865,6 @@ export default {
   /** Runs on the cron in wrangler.toml -- an hour after the weekly CA data refresh. */
   async scheduled(event, env, ctx) {
     ctx.waitUntil(watchlistSweep(env));
+    ctx.waitUntil(stateCoverageSweep(env));
   },
 };
