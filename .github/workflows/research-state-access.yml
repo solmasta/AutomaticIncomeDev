@@ -14,3 +14,7 @@ jobs:
       - name: Probe candidate state sites
         run: node research_state_access.js
         working-directory: ingest
+
+      - name: Dig deeper on NY's search form
+        run: node research_ny_search.js
+        working-directory: ingest
