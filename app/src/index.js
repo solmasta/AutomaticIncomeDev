@@ -201,6 +201,73 @@ function refundPolicyPage(env) {
 </html>`;
 }
 
+// Only sources actually verified live (fetched and inspected, not guessed):
+// CA has its own full search built into this site; TX/FL/NY/PA/IL each have
+// a confirmed official state portal; NAUPA's national search (unclaimed.org)
+// is the verified fallback for every other state -- it's the clearinghouse
+// endorsed by state unclaimed-property administrators, confirmed reachable
+// with no CAPTCHA/bot-block on a plain fetch. Some individual state sites
+// (e.g. Florida) are reCAPTCHA-gated and MissingMoney.com blocks scripted
+// requests outright -- none of that stops a human from clicking through in
+// their own browser, which is all a directory link needs.
+const NAUPA_SEARCH_URL = "https://unclaimed.org/search/";
+const STATE_DIRECTORY = [
+  { name: "Alabama" }, { name: "Alaska" }, { name: "Arizona" }, { name: "Arkansas" },
+  { name: "California", url: "/", note: "Full search built into this site" },
+  { name: "Colorado" }, { name: "Connecticut" }, { name: "Delaware" },
+  { name: "District of Columbia" },
+  { name: "Florida", url: "https://www.fltreasurehunt.gov/" },
+  { name: "Georgia" }, { name: "Hawaii" }, { name: "Idaho" },
+  { name: "Illinois", url: "https://icash.illinoistreasurer.gov/" },
+  { name: "Indiana" }, { name: "Iowa" }, { name: "Kansas" }, { name: "Kentucky" },
+  { name: "Louisiana" }, { name: "Maine" }, { name: "Maryland" }, { name: "Massachusetts" },
+  { name: "Michigan" }, { name: "Minnesota" }, { name: "Mississippi" }, { name: "Missouri" },
+  { name: "Montana" }, { name: "Nebraska" }, { name: "Nevada" }, { name: "New Hampshire" },
+  { name: "New Jersey" }, { name: "New Mexico" },
+  { name: "New York", url: "https://www.osc.ny.gov/unclaimed-funds" },
+  { name: "North Carolina" }, { name: "North Dakota" }, { name: "Ohio" }, { name: "Oklahoma" },
+  { name: "Oregon" },
+  { name: "Pennsylvania", url: "https://www.patreasury.gov/unclaimed-property/" },
+  { name: "Rhode Island" }, { name: "South Carolina" }, { name: "South Dakota" },
+  { name: "Tennessee" },
+  { name: "Texas", url: "https://www.claimittexas.gov/" },
+  { name: "Utah" }, { name: "Vermont" }, { name: "Virginia" }, { name: "Washington" },
+  { name: "West Virginia" }, { name: "Wisconsin" }, { name: "Wyoming" },
+];
+
+function statesPage() {
+  const rows = STATE_DIRECTORY.map((s) => {
+    const url = s.url || NAUPA_SEARCH_URL;
+    const label = s.url ? "Official state site →" : "Search via NAUPA →";
+    const note = s.note ? `<div class="meta">${s.note}</div>` : "";
+    return `<div class="row"><span>${s.name}</span><span><a href="${url}"${s.url === "/" ? "" : ' target="_blank" rel="noopener"'}>${label}</a>${note}</span></div>`;
+  }).join("");
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unclaimed Property by State</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 640px; margin: 0 auto; padding: 24px 16px 64px; background: #fafafa; color: #1a1a1a; }
+  @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } .row { border-color: #333 !important; } }
+  a { color: inherit; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 10px 0; border-bottom: 1px solid #ddd; flex-wrap: wrap; }
+  .meta { font-size: 0.78rem; color: #888; flex-basis: 100%; }
+  .disclosure { font-size: 0.85rem; color: #666; margin-top: 24px; }
+</style>
+</head>
+<body>
+  <p><a href="/">&larr; Back to California search</a></p>
+  <h1>Unclaimed Property by State</h1>
+  <p>This site's own free search only covers California. For every other state, here's a direct link to that state's own official search tool (or the national NAUPA clearinghouse, where a state doesn't have its own confirmed direct link) — all free, no signup.</p>
+  ${rows}
+  <div class="disclosure">Links go to official state or NAUPA (National Association of Unclaimed Property Administrators) sites. We don't operate or control them, and don't offer paid filing help for any state but California.</div>
+</body>
+</html>`;
+}
+
 function htmlPage(env) {
   const feeCents = Number(env.FILING_FEE_CENTS || 2900);
   const feeDisplay = (feeCents / 100).toFixed(2);
@@ -244,7 +311,7 @@ function htmlPage(env) {
 </head>
 <body>
   <h1>Find Your Unclaimed Money</h1>
-  <p class="sub">Free search of California's public unclaimed-property records. You can always file the claim yourself for free directly with the state — or pay a flat $${feeDisplay} fee to have it prepared and filed for you.</p>
+  <p class="sub">Free search of California's public unclaimed-property records. You can always file the claim yourself for free directly with the state — or pay a flat $${feeDisplay} fee to have it prepared and filed for you. Not in California? <a href="/states">Find your state's official search →</a></p>
   <div id="payment-banner"></div>
   <form id="search-form">
     <input type="text" id="name" placeholder="Your full name (e.g. Jane A Smith)" required>
@@ -601,6 +668,9 @@ export default {
     }
     if (url.pathname === "/refund-policy") {
       return new Response(refundPolicyPage(env), { headers: { "content-type": "text/html; charset=utf-8" } });
+    }
+    if (url.pathname === "/states") {
+      return new Response(statesPage(), { headers: { "content-type": "text/html; charset=utf-8" } });
     }
     if (url.pathname === "/api/search" && request.method === "GET") {
       return handleSearch(url, env);
