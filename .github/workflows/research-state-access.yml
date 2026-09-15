@@ -18,3 +18,7 @@ jobs:
       - name: Dig deeper on NY's search form
         run: node research_ny_search.js
         working-directory: ingest
+
+      - name: Verify NAUPA/MissingMoney URLs
+        run: node research_naupa.js
+        working-directory: ingest
