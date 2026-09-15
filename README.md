@@ -143,11 +143,16 @@ not legal advice.
 
 ### Scaling notes
 
-D1's free tier (5 GB storage, generous but not unlimited daily read/write
-quotas) comfortably fits a single state's `$500+` properties. If a full
-weekly refresh ever hits the daily write quota, either spread the import
-across a couple of days or move to D1's paid tier (still inexpensive) —
-this hasn't been an issue at CA-only scale.
+Measured against the real file: CA's `$500+` extract alone is ~760,000
+rows, well over D1's free-tier write quota (~100k rows/day) in a single
+sync. `.github/workflows/refresh-ca-data.yml` sets `MIN_CASH=5000` for
+that reason — it trades search coverage (fewer, higher-value matches)
+for a sync that actually completes on the free tier. To widen coverage
+back down toward `$500`, either move to D1's (still inexpensive) paid
+tier, or spread the import across several days. `BATCH_SIZE=1000` in the
+same workflow also cuts the number of `wrangler d1 execute` calls the
+import step makes — each call carries CLI startup + network overhead, so
+fewer, larger batches materially speeds up the sync.
 
 ---
 
