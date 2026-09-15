@@ -26,7 +26,7 @@ jobs:
           # long time. Raise this once you've upgraded D1 or want to widen
           # the search coverage; lower it if imports are still too slow/large.
           MIN_CASH: "5000"
-          BATCH_SIZE: "1000"
+          BATCH_SIZE: "100"
 
       - name: Import into Cloudflare D1
         working-directory: app
