@@ -81,8 +81,8 @@ async function findCsv(dir) {
   return null;
 }
 
-/** Minimal RFC4180-ish line parser: handles quoted fields with embedded commas/quotes. */
-function parseCsvLine(line) {
+/** Minimal RFC4180-ish line parser: handles quoted fields with embedded delimiters/quotes. */
+function parseDelimitedLine(line, delimiter) {
   const fields = [];
   let cur = "";
   let inQuotes = false;
@@ -101,7 +101,7 @@ function parseCsvLine(line) {
       }
     } else if (ch === '"') {
       inQuotes = true;
-    } else if (ch === ",") {
+    } else if (ch === delimiter) {
       fields.push(cur);
       cur = "";
     } else {
@@ -110,6 +110,34 @@ function parseCsvLine(line) {
   }
   fields.push(cur);
   return fields.map((f) => f.trim());
+}
+
+/** CA's public bulk file turned out to be pipe-delimited NAUPA-standard export with NO
+ * header row (discovered against the real 04_From_500_To_Beyond.zip file) -- confirmed
+ * by inspecting an actual data row: fixed field positions below, verified against it.
+ * Comma-delimited-with-header files (an older assumption, kept as a fallback in case a
+ * future refresh reverts format) are still auto-detected and handled the old way. */
+function detectDelimiter(line) {
+  const pipes = (line.match(/\|/g) || []).length;
+  const commas = (line.match(/,/g) || []).length;
+  return pipes > commas ? "|" : ",";
+}
+
+const NAUPA_FIXED_FIELDS = {
+  sourceRowId: 0,
+  propertyType: 1,
+  cashReported: 2,
+  ownerName: 6,
+  city: 10,
+  holderName: 17,
+  // No report/void date is exposed in this public extract at all -- reportedDate is
+  // left null for NAUPA-format rows. See README for what that means for the
+  // solicitation-wait-period gate.
+};
+
+function looksLikeHeaderRow(fields) {
+  const joined = fields.join(" ").toLowerCase();
+  return joined.includes("owner") && joined.includes("name");
 }
 
 function buildHeaderMap(headers) {
@@ -171,6 +199,8 @@ async function main() {
 
   const rl = createInterface({ input: createReadStream(csvPath, { encoding: "utf8" }) });
   let headerMap = null;
+  let delimiter = null;
+  let fixedFormat = false;
   let batch = [];
   let batchIndex = 0;
   let totalKept = 0;
@@ -198,35 +228,54 @@ async function main() {
 
   for await (const rawLine of rl) {
     if (!rawLine) continue;
-    const fields = parseCsvLine(rawLine);
-    if (!headerMap) {
-      headerMap = buildHeaderMap(fields);
-      if (headerMap.ownerName < 0) {
-        throw new Error(
-          `Could not find an owner-name column in headers: ${fields.join(" | ")}. ` +
-            "Update buildHeaderMap() to match the real column name."
-        );
+
+    if (delimiter === null) {
+      delimiter = detectDelimiter(rawLine);
+      const firstFields = parseDelimitedLine(rawLine, delimiter);
+      if (looksLikeHeaderRow(firstFields)) {
+        headerMap = buildHeaderMap(firstFields);
+        if (headerMap.ownerName < 0) {
+          throw new Error(
+            `Header row detected but no owner-name column found: ${firstFields.join(" | ")}. ` +
+              "Update buildHeaderMap() to match the real column name."
+          );
+        }
+        continue; // consumed as the header row, not a data row
       }
-      continue;
+      // No header row -- this file is the fixed-position NAUPA format, and this
+      // first line is already a data row, so fall through and parse it below.
+      fixedFormat = true;
     }
+
+    const fields = parseDelimitedLine(rawLine, delimiter);
     totalSeen++;
-    const ownerName = fields[headerMap.ownerName];
-    const cashRaw = headerMap.cashReported >= 0 ? fields[headerMap.cashReported] : "";
-    const cashReported = Number(String(cashRaw).replace(/[^0-9.]/g, "")) || 0;
+
+    let ownerName, city, holderName, propertyType, cashReported, reportedDate;
+    if (fixedFormat) {
+      ownerName = fields[NAUPA_FIXED_FIELDS.ownerName];
+      city = fields[NAUPA_FIXED_FIELDS.city] || "";
+      holderName = fields[NAUPA_FIXED_FIELDS.holderName] || "";
+      propertyType = fields[NAUPA_FIXED_FIELDS.propertyType] || "";
+      cashReported = Number(String(fields[NAUPA_FIXED_FIELDS.cashReported] || "").replace(/[^0-9.]/g, "")) || 0;
+      reportedDate = ""; // not present in this public extract
+    } else {
+      ownerName = fields[headerMap.ownerName];
+      city = headerMap.city >= 0 ? fields[headerMap.city] : "";
+      holderName = headerMap.holderName >= 0 ? fields[headerMap.holderName] : "";
+      propertyType = headerMap.propertyType >= 0 ? fields[headerMap.propertyType] : "";
+      cashReported = Number(String(headerMap.cashReported >= 0 ? fields[headerMap.cashReported] : "").replace(/[^0-9.]/g, "")) || 0;
+      reportedDate = headerMap.reportedDate >= 0 ? fields[headerMap.reportedDate] : "";
+    }
+
     if (!ownerName || cashReported < MIN_CASH) continue;
 
-    batch.push({
-      ownerName,
-      city: headerMap.city >= 0 ? fields[headerMap.city] : "",
-      holderName: headerMap.holderName >= 0 ? fields[headerMap.holderName] : "",
-      propertyType: headerMap.propertyType >= 0 ? fields[headerMap.propertyType] : "",
-      cashReported,
-      reportedDate: headerMap.reportedDate >= 0 ? fields[headerMap.reportedDate] : "",
-    });
+    batch.push({ ownerName, city, holderName, propertyType, cashReported, reportedDate });
     totalKept++;
     if (batch.length >= BATCH_SIZE) await flushBatch();
   }
   await flushBatch();
+
+  console.log(`Format detected: ${fixedFormat ? "fixed-position NAUPA (pipe-delimited, no header)" : "header-based CSV"}, delimiter "${delimiter}".`);
 
   console.log(`Done. Scanned ${totalSeen} rows, kept ${totalKept} at >= $${MIN_CASH}.`);
   console.log(`Wrote ${batchIndex} SQL files to ${OUTPUT_DIR}/`);
