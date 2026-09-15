@@ -27,9 +27,13 @@ import path from "node:path";
 const DOWNLOAD_PAGE_URL =
   process.env.DOWNLOAD_PAGE_URL || "https://sco.ca.gov/upd_download_property_records.html";
 const MIN_CASH = Number(process.env.MIN_CASH || 500);
-const OUTPUT_DIR = process.env.OUTPUT_DIR || path.join("ingest", "output");
+// Defaults assume this script runs with its own directory (ingest/) as the
+// cwd -- true both when run locally as `node fetch_ca_unclaimed.js` from
+// inside ingest/, and in the GitHub Actions workflow, which sets
+// working-directory: ingest for this step. Don't re-prefix "ingest" here.
+const OUTPUT_DIR = process.env.OUTPUT_DIR || "output";
 const BATCH_SIZE = Number(process.env.BATCH_SIZE || 300);
-const TMP_DIR = path.join("ingest", "tmp");
+const TMP_DIR = "tmp";
 
 async function fetchText(url) {
   const res = await fetch(url, { headers: { "user-agent": "unclaimed-money-finder-ingest/1.0" } });
@@ -118,9 +122,12 @@ function parseDelimitedLine(line, delimiter) {
  * Comma-delimited-with-header files (an older assumption, kept as a fallback in case a
  * future refresh reverts format) are still auto-detected and handled the old way. */
 function detectDelimiter(line) {
-  const pipes = (line.match(/\|/g) || []).length;
-  const commas = (line.match(/,/g) || []).length;
-  return pipes > commas ? "|" : ",";
+  // A literal pipe character essentially never shows up in ordinary name/address
+  // text, so "any pipes at all" is a far more reliable signal than comparing
+  // raw pipe vs. comma counts -- a comma-containing address ("123 MAIN ST, APT 2")
+  // could otherwise outnumber pipes on an actually-pipe-delimited line and cause
+  // a misdetection that silently scrambles every field for the whole file.
+  return line.includes("|") ? "|" : ",";
 }
 
 const NAUPA_FIXED_FIELDS = {
@@ -269,13 +276,22 @@ async function main() {
 
     if (!ownerName || cashReported < MIN_CASH) continue;
 
+    if (totalKept === 0) {
+      // Print the first real row that will actually be imported so a human can
+      // eyeball it in the Actions log and confirm fields landed in the right
+      // places before trusting the rest of the run.
+      console.log(
+        `Format detected: ${fixedFormat ? "fixed-position NAUPA" : "header-based CSV"}, delimiter ${JSON.stringify(delimiter)}.\n` +
+          `Sample parsed row -> owner: ${JSON.stringify(ownerName)}, city: ${JSON.stringify(city)}, ` +
+          `holder: ${JSON.stringify(holderName)}, cash: ${cashReported}, type: ${JSON.stringify(propertyType)}`
+      );
+    }
+
     batch.push({ ownerName, city, holderName, propertyType, cashReported, reportedDate });
     totalKept++;
     if (batch.length >= BATCH_SIZE) await flushBatch();
   }
   await flushBatch();
-
-  console.log(`Format detected: ${fixedFormat ? "fixed-position NAUPA (pipe-delimited, no header)" : "header-based CSV"}, delimiter "${delimiter}".`);
 
   console.log(`Done. Scanned ${totalSeen} rows, kept ${totalKept} at >= $${MIN_CASH}.`);
   console.log(`Wrote ${batchIndex} SQL files to ${OUTPUT_DIR}/`);
