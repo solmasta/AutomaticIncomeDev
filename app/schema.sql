@@ -29,6 +29,25 @@ CREATE TABLE IF NOT EXISTS watchlist (
 
 CREATE INDEX IF NOT EXISTS idx_watchlist_name_norm ON watchlist(name_normalized);
 
+-- Populated by the state-coverage research agent (and seeded once from this
+-- session's manual recon) -- the /states directory renders from this table
+-- instead of a hardcoded list, so newly-researched states show up
+-- automatically without a code change.
+CREATE TABLE IF NOT EXISTS state_coverage (
+  state TEXT PRIMARY KEY,              -- two-letter code, e.g. 'CA', or 'DC'
+  state_name TEXT NOT NULL,
+  cash_search_type TEXT NOT NULL DEFAULT 'unchecked',
+    -- 'bulk_download' | 'live_form_open' | 'captcha_blocked' | 'bot_detected' | 'js_app_unknown' | 'unchecked'
+  cash_search_url TEXT,                -- the state's own official search/download page
+  cash_search_notes TEXT,
+  auction_vendor_verified INTEGER NOT NULL DEFAULT 0,
+  auction_vendor_url TEXT,             -- official safe-deposit-box/tangible-property auction page, if any
+  auction_notes TEXT,
+  last_checked_at TEXT,
+  checked_by TEXT NOT NULL DEFAULT 'manual',  -- 'agent' | 'manual'
+  confidence TEXT                      -- brief note on how sure the agent is, for a human to sanity-check
+);
+
 CREATE TABLE IF NOT EXISTS leads (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT NOT NULL,

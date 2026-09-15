@@ -106,13 +106,39 @@ npm bundle for the CI deploy to break on.
    or claim numbers it wasn't given — the checklist tells you to verify
    current requirements against the state's own instructions before
    mailing.
+4. **State-coverage research agent** — runs in the same weekly cron, using
+   Claude Sonnet 5 with live `web_search`/`web_fetch` tools to research a
+   couple of states per run (whichever haven't been checked, or haven't
+   been re-checked in 90 days): does the state offer a genuinely open bulk
+   dataset, a scrapeable live search, or is it CAPTCHA/bot-detection
+   gated — and does it run a legitimate public auction (directly or via a
+   named vendor) for unclaimed safe-deposit-box contents. It only reports
+   a URL as verified if it actually fetched that page itself; findings
+   land in the `state_coverage` table and `/states` renders live from
+   there. This never becomes a new scraping integration on its own — a
+   human still reviews and decides before any new state gets wired into
+   the real search/ingest pipeline the way California is. Skips itself
+   entirely (no cost, no API calls) if `ANTHROPIC_API_KEY` isn't set.
 
 To turn these on, add as encrypted Cloudflare variables (same dashboard
 path as the Stripe keys above):
-- `ANTHROPIC_API_KEY` — console.anthropic.com → API Keys. Powers agents 1 and 3.
+- `ANTHROPIC_API_KEY` — console.anthropic.com → API Keys. Powers agents 1, 3, and 4.
 - `RESEND_API_KEY` — resend.com (free tier) → API Keys. Powers agents 2 and 3.
   Without a verified sending domain, leave `FROM_EMAIL` at its default
   `onboarding@resend.dev` (Resend's no-setup sandbox sender).
+
+### Auctions vs. money search — an important distinction
+
+`/states` links out to each state's own official unclaimed-*money* search,
+and separately, where verified, to a state's official safe-deposit-box
+*auction* vendor (California's is Lone Star Auctioneers, confirmed live
+this session). Both are plain links a human clicks through — **this site
+never takes bids, collects payment, or holds money for auctioned
+property, for any state.** Only the state (through its own contracted
+auctioneer) has legal authority to sell property still in state custody;
+running our own bidding on it would mean selling something we have no
+title to, which is fraud regardless of intent. The auction directory is a
+signpost, not a marketplace, and it should stay that way.
 
 Also set `SITE_URL` in `app/wrangler.toml` to your real `*.workers.dev`
 URL once you have it (used in the watchlist-match email link) and push.
