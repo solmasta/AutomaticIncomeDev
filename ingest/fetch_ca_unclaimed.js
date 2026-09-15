@@ -14,7 +14,11 @@
 //   CSV_URL_OVERRIDE    skip auto-discovery and use this URL directly
 //   MIN_CASH            default: 500 (only keep properties worth pursuing)
 //   OUTPUT_DIR          default: ingest/output
-//   BATCH_SIZE          default: 300 rows per SQL INSERT batch
+//   BATCH_SIZE          default: 100 rows per single INSERT statement (D1's
+//                       per-statement size limit rejected 1000; 100 confirmed OK)
+//   STATEMENTS_PER_FILE default: 50 statements bundled per SQL file, so each
+//                       `wrangler d1 execute` CLI invocation applies many
+//                       statements at once instead of one process per batch
 
 import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
@@ -213,20 +217,43 @@ async function main() {
   let totalKept = 0;
   let totalSeen = 0;
 
-  const flushBatch = async () => {
-    if (batch.length === 0) return;
-    const values = batch
+  // Two-level batching: each INSERT statement holds STATEMENT_ROWS rows (kept
+  // well under D1's per-statement size limit -- 1000 rows tripped SQLITE_TOOBIG,
+  // 100 is confirmed safe against the real schema/data), but many statements
+  // get bundled into one file so `wrangler d1 execute` processes them in a
+  // single CLI invocation. At 100 rows/statement and one invocation per file,
+  // importing CA's full ~760k-row $500+ file would mean ~7,600 separate
+  // `wrangler` process launches (each with real CLI-startup + network
+  // overhead) -- realistically hours. Bundling STATEMENTS_PER_FILE statements
+  // per file cuts that to ~STATEMENTS_PER_FILE-times fewer invocations.
+  const STATEMENT_ROWS = BATCH_SIZE;
+  const STATEMENTS_PER_FILE = Number(process.env.STATEMENTS_PER_FILE || 50);
+  let fileStatements = [];
+
+  const buildStatement = (rows) => {
+    const values = rows
       .map(
         (r) =>
           `(${sqlEscape(r.ownerName)}, ${sqlEscape(normalizeName(r.ownerName))}, ${sqlEscape(r.city)}, 'CA', ${sqlEscape(r.holderName)}, ${sqlEscape(r.propertyType)}, ${r.cashReported}, ${sqlEscape(r.reportedDate)})`
       )
       .join(",\n  ");
-    const sql =
-      `INSERT INTO properties (owner_name, owner_name_normalized, city, state, holder_name, property_type, cash_reported, reported_date)\nVALUES\n  ${values};\n`;
+    return `INSERT INTO properties (owner_name, owner_name_normalized, city, state, holder_name, property_type, cash_reported, reported_date)\nVALUES\n  ${values};\n`;
+  };
+
+  const flushFile = async () => {
+    if (fileStatements.length === 0) return;
     const fileName = path.join(OUTPUT_DIR, `${String(batchIndex).padStart(5, "0")}_ca_batch.sql`);
-    await writeFile(fileName, sql, "utf8");
+    await writeFile(fileName, fileStatements.join("\n"), "utf8");
     batchIndex++;
-    batch = [];
+    fileStatements = [];
+  };
+
+  const flushBatch = async () => {
+    if (batch.length > 0) {
+      fileStatements.push(buildStatement(batch));
+      batch = [];
+    }
+    if (fileStatements.length >= STATEMENTS_PER_FILE) await flushFile();
   };
 
   // First batch resets CA rows so the weekly sync doesn't accumulate stale duplicates.
@@ -276,6 +303,13 @@ async function main() {
 
     if (!ownerName || cashReported < MIN_CASH) continue;
 
+    // Some real owner names strip down to nothing once normalized (e.g. purely
+    // punctuation/non-Latin text) -- owner_name_normalized is NOT NULL in the
+    // schema, and such a record wouldn't be findable by name search anyway, so
+    // skip it rather than let sqlEscape("") silently emit a literal NULL and
+    // blow up the whole batch's INSERT on a constraint violation.
+    if (!normalizeName(ownerName)) continue;
+
     if (totalKept === 0) {
       // Print the first real row that will actually be imported so a human can
       // eyeball it in the Actions log and confirm fields landed in the right
@@ -289,12 +323,13 @@ async function main() {
 
     batch.push({ ownerName, city, holderName, propertyType, cashReported, reportedDate });
     totalKept++;
-    if (batch.length >= BATCH_SIZE) await flushBatch();
+    if (batch.length >= STATEMENT_ROWS) await flushBatch();
   }
-  await flushBatch();
+  await flushBatch(); // pushes any partial trailing statement into fileStatements
+  await flushFile(); // writes any partial trailing file (< STATEMENTS_PER_FILE statements)
 
   console.log(`Done. Scanned ${totalSeen} rows, kept ${totalKept} at >= $${MIN_CASH}.`);
-  console.log(`Wrote ${batchIndex} SQL files to ${OUTPUT_DIR}/`);
+  console.log(`Wrote ${batchIndex - 1} SQL batch file(s) to ${OUTPUT_DIR}/ (${STATEMENT_ROWS} rows/statement, up to ${STATEMENTS_PER_FILE} statements/file).`);
 }
 
 main().catch((err) => {
