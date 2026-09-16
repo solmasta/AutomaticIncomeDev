@@ -836,7 +836,7 @@ async function handleStripeWebhook(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === "/") {
       return new Response(htmlPage(env), { headers: { "content-type": "text/html; charset=utf-8" } });
@@ -870,8 +870,12 @@ export default {
       if (!env.ANTHROPIC_API_KEY) {
         return Response.json({ ran: false, reason: "ANTHROPIC_API_KEY not set" }, { status: 200 });
       }
-      await stateCoverageSweep(env, 1);
-      return Response.json({ ran: true });
+      // A real research call (with live web_search/web_fetch rounds) can take
+      // well over a minute -- run it in the background via waitUntil instead
+      // of blocking the response, or the request just times out with no
+      // reply at all. Check the state_coverage table a bit later for results.
+      ctx.waitUntil(stateCoverageSweep(env, 1));
+      return Response.json({ ran: true, note: "Started in the background -- check the state_coverage table in a minute or two." });
     }
     return new Response("Not found", { status: 404 });
   },
